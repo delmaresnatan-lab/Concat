@@ -1721,6 +1721,9 @@ export component Lanes inherits Rectangle {
 
             property <bool> drawing;
             property <bool> additive;
+            /// A drag resolved to scrubbing the playhead, not drawing a band;
+            /// see how `moved` settles it.
+            property <bool> scrub-drag;
             property <length> from-x;
             property <length> from-y;
             property <length> to-x;
@@ -1730,6 +1733,7 @@ export component Lanes inherits Rectangle {
                 if (event.kind == PointerEventKind.down) {
                     root.floor-pressed();
                     self.additive = event.modifiers.shift;
+                    self.scrub-drag = false;
                     self.from-x = self.mouse-x;
                     self.from-y = self.mouse-y;
                     self.to-x = self.mouse-x;
@@ -1741,7 +1745,12 @@ export component Lanes inherits Rectangle {
                     }
                 } else if (event.kind == PointerEventKind.up
                     || event.kind == PointerEventKind.cancel) {
-                    if (self.drawing) {
+                    if (self.scrub-drag) {
+                        // A drag that scrubbed made no selection: no band was
+                        // drawn, and what is selected stays as it was.
+                        self.scrub-drag = false;
+                        root.scrubbing = false;
+                    } else if (self.drawing) {
                         self.drawing = false;
                         // A press that never travelled is a click, not a
                         // band: the playhead goes where it landed, as on
@@ -1775,8 +1784,37 @@ export component Lanes inherits Rectangle {
             moved => {
                 self.to-x = self.mouse-x;
                 self.to-y = self.mouse-y;
-                if (root.finger && self.pressed) {
-                    root.finger-moved(self.mouse-x, self.mouse-y, true);
+                if (root.finger) {
+                    if (self.pressed) {
+                        root.finger-moved(self.mouse-x, self.mouse-y, true);
+                    }
+                    return;
+                }
+                // A drag that has left the click's radius settles what it is
+                // by the way it is going, the way the ruler and this floor
+                // already share a surface by whether the pointer travelled:
+                // down the stack draws the band it always drew — a shift held
+                // keeps the band too, for it came to add to a selection — and
+                // along the cut scrubs, as a finger's drag along the lanes
+                // does on the phone. Once settled it stays: a drag that
+                // doubles back does not change its mind.
+                if (self.scrub-drag) {
+                    root.pointer-x = self.mouse-x;
+                    root.scrubbed(Math.max(0, root.seconds-at(self.mouse-x)));
+                } else if (self.drawing && self.pressed
+                    && (Math.abs(self.to-x - self.from-x) > 4px
+                        || Math.abs(self.to-y - self.from-y) > 4px)
+                    && !self.additive
+                    && Math.abs(self.to-x - self.from-x)
+                        > Math.abs(self.to-y - self.from-y)) {
+                    self.drawing = false;
+                    self.scrub-drag = true;
+                    // The ruler's own two: the edge scroll repeats the scrub
+                    // from `pointer-x`, and the monitor follows the playhead
+                    // rather than the frame the axis hover was last showing.
+                    root.scrubbing = true;
+                    root.hover-ended();
+                    root.scrubbed(Math.max(0, root.seconds-at(self.mouse-x)));
                 }
             }
 
@@ -2053,6 +2091,10 @@ export component Lanes inherits Rectangle {
                         return;
                     }
                     if (event.kind == PointerEventKind.down) {
+                        // A hover the axis was showing is not where the
+                        // monitor belongs now: the playhead moves, and a
+                        // stale hover would hold it at the press point.
+                        root.hover-ended();
                         root.scrubbing = true;
                         root.pointer-x = self.mouse-x;
                         root.scrubbed(Math.max(0, root.seconds-at(self.mouse-x)));
