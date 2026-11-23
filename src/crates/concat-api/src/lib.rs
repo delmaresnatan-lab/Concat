@@ -2396,6 +2396,153 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_becomes_a_compound_undoes_and_survives_reopening() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "Compound");
+
+        // Two clips on two rows: gathering rows the merge never could is
+        // the whole point of a compound.
+        let mut ids = Vec::new();
+        for (file, start) in [("/nowhere/one.png", 0.0), ("/nowhere/two.png", 2.0)] {
+            let added = view(ok(api.dispatch(Request::EditApply {
+                path: path.clone(),
+                command: Box::new(Command::AddMedia {
+                    item: still(file),
+                }),
+            })));
+            let placed = view(ok(api.dispatch(Request::EditApply {
+                path: path.clone(),
+                command: Box::new(Command::AddClipAtFirstFree {
+                    media_id: added.created_id.expect("minted"),
+                    start,
+                }),
+            })));
+            ids.push(placed.created_id.expect("minted"));
+        }
+
+        // Grouping: one compound clip on the active timeline, and the two
+        // it took in living on a sub-timeline of their own.
+        let compound_id = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::CompoundClips {
+                clip_ids: ids.clone(),
+            }),
+        })))
+        .created_id
+        .expect("the compound clip's id");
+
+        let document_of = |api: &mut Api, path: &str| match ok(api.dispatch(
+            Request::ProjectDocument {
+                path: path.to_owned(),
+            },
+        )) {
+            Reply::Document(document) => document,
+            _ => panic!("not a document"),
+        };
+        let document = document_of(&mut api, &path);
+        let compound = document["clips"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no clips"))
+            .iter()
+            .find(|clip| clip["id"] == compound_id.as_str())
+            .expect("the compound on the active timeline")
+            .clone();
+        assert_eq!(compound["kind"], "compound", "a kind of its own");
+        let subtimeline = compound["compound"]["subtimelineId"]
+            .as_str()
+            .expect("reading a sub-timeline")
+            .to_owned();
+        let timelines = document["timelines"]
+            .as_array()
+            .expect("timelines");
+        assert_eq!(timelines.len(), 2, "the sub-timeline joins the project");
+        let timeline = timelines
+            .iter()
+            .find(|timeline| timeline["id"] == subtimeline.as_str())
+            .expect("the sub-timeline in the project");
+        let gathered = timeline["clips"].as_array().expect("clips");
+        assert_eq!(gathered.len(), 2, "both clips moved in");
+        assert_eq!(
+            gathered[0]["id"], ids[0].as_str(),
+            "the same clip, not a copy"
+        );
+
+        // Taking it apart: the clips come back to where they sat, and the
+        // sub-timeline is gone with the compound.
+        ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::UncompoundClips {
+                clip_id: compound_id.clone(),
+            }),
+        }));
+        let document = document_of(&mut api, &path);
+        assert_eq!(
+            document["timelines"].as_array().expect("timelines").len(),
+            1,
+            "the sub-timeline left with the compound"
+        );
+        let clips = document["clips"].as_array().expect("clips");
+        assert_eq!(clips.len(), 2, "the gathered clips are back");
+        for id in &ids {
+            assert!(
+                clips.iter().any(|clip| clip["id"] == id.as_str()),
+                "{id} restored"
+            );
+        }
+
+        // The document's own undo steps back over the grouping too.
+        ok(api.dispatch(Request::EditUndo {
+            path: path.clone(),
+        }));
+        let document = document_of(&mut api, &path);
+        let compound = document["clips"]
+            .as_array()
+            .expect("clips")
+            .iter()
+            .find(|clip| clip["id"] == compound_id.as_str())
+            .expect("undo brought the compound back")
+            .clone();
+        assert_eq!(compound["kind"], "compound");
+
+        // Reopening reads the compound and its sub-timeline off the disk,
+        // and the compound still comes apart afterwards.
+        ok(api.dispatch(Request::ProjectClose {
+            path: path.clone(),
+            save: true,
+        }));
+        ok(api.dispatch(Request::ProjectOpen {
+            path: path.clone(),
+        }));
+        let document = document_of(&mut api, &path);
+        let compound = document["clips"]
+            .as_array()
+            .expect("clips")
+            .iter()
+            .find(|clip| clip["id"] == compound_id.as_str())
+            .expect("the compound survived the reopen")
+            .clone();
+        assert_eq!(compound["kind"], "compound", "still a compound");
+        assert_eq!(
+            compound["compound"]["subtimelineId"].as_str(),
+            Some(subtimeline.as_str()),
+            "still reading the same sub-timeline"
+        );
+        ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::UncompoundClips { clip_id: compound_id }),
+        }));
+        let document = document_of(&mut api, &path);
+        let clips = document["clips"].as_array().expect("clips");
+        assert_eq!(
+            clips.len(),
+            2,
+            "taken apart after the reopen, the clips restored"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
     fn version_names_what_the_build_serves() {
         let (mut api, _scratch, _events) = api();
         let base = api.version();

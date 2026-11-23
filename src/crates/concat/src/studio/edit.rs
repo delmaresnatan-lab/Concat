@@ -225,7 +225,10 @@ impl Studio {
                         | model::ClipKind::Layer
                         | model::ClipKind::SoundLayer
                         | model::ClipKind::Shape
-                        | model::ClipKind::Transition => LANE_SMALL,
+                        | model::ClipKind::Transition
+                        // A compound spans what it gathers, but its own
+                        // strip is a bar's, like a transition's.
+                        | model::ClipKind::Compound => LANE_SMALL,
                     })
                     .fold(0.0_f32, f32::max);
                 if tallest > 0.0 { tallest } else { LANE_MEDIUM }

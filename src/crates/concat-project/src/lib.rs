@@ -50,6 +50,66 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_compound_shows_a_picture_only_when_its_contents_do() {
+        use crate::model::{Background, Clip, ClipKind, Project, Timeline, Track};
+        use std::sync::Arc;
+
+        let clip_from = |fields: serde_json::Value| -> Clip {
+            serde_json::from_value(fields).expect("a clip from its fields")
+        };
+        let image = |track: &str| clip_from(json!({
+            "id": "c9", "kind": "image", "trackId": track,
+            "name": "still", "start": 0.0, "duration": 5.0, "mediaId": "m1",
+        }));
+        let sound = |track: &str| clip_from(json!({
+            "id": "c8", "kind": "audio", "trackId": track,
+            "name": "voice", "start": 0.0, "duration": 5.0, "mediaId": "m2",
+        }));
+        let mut project = Project::new();
+        let video = project.timelines[0].video.clone();
+        let sub = |id: &str, clips: Vec<Clip>| -> Timeline {
+            Timeline {
+                id: id.to_owned(),
+                name: "Sub".to_owned(),
+                video: video.clone(),
+                background: Background::None,
+                tracks: vec![Track {
+                    id: format!("S{id}"),
+                    ..Track::default()
+                }],
+                clips: clips.into_iter().map(Arc::new).collect(),
+                linkage: true,
+                extra: Default::default(),
+            }
+        };
+        let compound_on = |subtimeline: &str| clip_from(json!({
+            "id": "c1", "kind": "compound", "trackId": "T4",
+            "name": "Compound 1", "start": 0.0, "duration": 5.0,
+            "compound": {"subtimelineId": subtimeline, "origins": []},
+        }));
+
+        // A compound of a picture carries a picture...
+        project.timelines.push(Arc::new(sub("TL2", vec![image("STL2")])));
+        let compound = compound_on("TL2");
+        assert!(project.compound_shows_picture(&compound, 8));
+
+        // ...one of only sound does not...
+        project.timelines.push(Arc::new(sub("TL3", vec![sound("STL3")])));
+        let compound_of_sound = compound_on("TL3");
+        assert!(!project.compound_shows_picture(&compound_of_sound, 8));
+
+        // ...and one of a compound of a picture still does, but a lost
+        // reference and a cycle draw nothing.
+        project.timelines.push(Arc::new(sub("TL4", vec![compound_on("TL2")])));
+        let nested = compound_on("TL4");
+        assert!(project.compound_shows_picture(&nested, 8));
+        assert!(!project.compound_shows_picture(&nested, 0));
+        let lost = compound_on("TL5");
+        assert!(!project.compound_shows_picture(&lost, 8));
+        let _ = ClipKind::Compound;
+    }
+
+    #[test]
     fn typography_preserves_source_and_round_trips() {
         use crate::model::{TextCase, TextStyle};
         let original = "«È UNA PROVA!» POI, UN’ALTRA. già qui? sì!";

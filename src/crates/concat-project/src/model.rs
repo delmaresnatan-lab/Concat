@@ -91,6 +91,14 @@ pub enum ClipKind {
     /// ties a transition to the cut into one clip, it is placed, moved and
     /// trimmed like any clip.
     Transition,
+    /// A compound clip (a sub-timeline): the clips it groups live on
+    /// another [`Timeline`] of the same project, named by
+    /// [`Clip::compound`], and render wherever the compound sits - the
+    /// flattening one step of the pipeline expands it there, so preview,
+    /// export and sound all read it with no render in between. No media
+    /// behind it; the timeline is the content, and editing it - the tab
+    /// the compound opens - is how the compound is edited.
+    Compound,
 }
 
 impl ClipKind {
@@ -98,6 +106,39 @@ impl ClipKind {
     pub fn is_visual(self) -> bool {
         matches!(self, ClipKind::Video | ClipKind::Image)
     }
+}
+
+/// How deep a compound may nest inside another before the flatten stops
+/// walking: compounds of compounds are legitimate, a cycle is not.
+pub const MAX_COMPOUND_DEPTH: usize = 8;
+
+/// Where a compound clip's contents came from, so undoing the compound
+/// can put them back; see [`Clip::compound`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompoundRef {
+    /// The [`Timeline`] the grouped clips live on now.
+    pub subtimeline_id: String,
+    /// Where each clip the compound absorbed sat before, by its id - the
+    /// lane it sat on and how far into the compound's span it began.
+    /// Relative to the span, so moving the compound carries its contents
+    /// with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<CompoundOrigin>,
+}
+
+/// One clip's place before a compound took it in; see [`CompoundRef`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompoundOrigin {
+    /// The clip that moved.
+    pub clip_id: String,
+    /// The lane of the timeline it came from.
+    pub track_id: String,
+    /// Seconds from the compound's own start where the clip began.
+    pub start: f64,
 }
 
 /// One audio stream of a media file, as the probe reported it. A screen
@@ -2955,6 +2996,10 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "wire::maybe")]
     pub background: Option<Background>,
+    /// The sub-timeline and the places-restored data, when this is a
+    /// compound clip; see [`ClipKind::Compound`] and [`CompoundRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compound: Option<CompoundRef>,
     /// Fields this build does not know, kept so a document written by a
     /// newer or a different build round-trips through this one intact.
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
@@ -3056,6 +3101,7 @@ impl Clip {
             text: None,
             shape: None,
             background: None,
+            compound: None,
             extra: Map::new(),
         }
     }
@@ -3880,6 +3926,32 @@ impl Project {
     /// The bin entry with this id, or None if it was removed.
     pub fn media_by_id(&self, media_id: &str) -> Option<&MediaItem> {
         self.media.iter().find(|item| item.id == media_id)
+    }
+
+    /// Whether a compound clip would draw anything once flattened: a
+    /// compound of only audio clips carries no picture. Depth-guarded
+    /// like the flatten, against a compound cycle.
+    pub fn compound_shows_picture(&self, clip: &Clip, depth: usize) -> bool {
+        let Some(reference) = clip.compound.as_ref() else {
+            return false;
+        };
+        let Some(subtimeline) = self
+            .timelines
+            .iter()
+            .find(|timeline| timeline.id == reference.subtimeline_id)
+        else {
+            return false;
+        };
+        depth > 0
+            && subtimeline.clips.iter().any(|inner| {
+                inner.kind.is_visual()
+                    || matches!(
+                        inner.kind,
+                        ClipKind::Text | ClipKind::Shape | ClipKind::Compound
+                    )
+                        && (inner.kind != ClipKind::Compound
+                            || self.compound_shows_picture(inner, depth - 1))
+            })
     }
 
     /// Returns every media item whose file does not exist on disk.

@@ -16,7 +16,8 @@
 use std::path::Path;
 
 use concat_project::model::{
-    Background, ClipKind as ModelClipKind, KeyProperty, MediaKind, Project, Timeline,
+    Background, Clip, ClipKind as ModelClipKind, KeyProperty, MAX_COMPOUND_DEPTH, MediaKind,
+    Project, Timeline,
 };
 
 use crate::chains::audio_filter_chain;
@@ -39,6 +40,18 @@ pub fn flatten_timeline_in(
     timeline_id: Option<&str>,
     project_dir: Option<&Path>,
 ) -> Vec<ExportClip> {
+    flatten_nested(project, timeline_id, project_dir, 0)
+}
+
+/// [`flatten_timeline_in`], at a nesting level: every compound clip met is
+/// expanded in place, its contents flattened from their own timeline and
+/// shifted onto the compound's span and lanes.
+fn flatten_nested(
+    project: &Project,
+    timeline_id: Option<&str>,
+    project_dir: Option<&Path>,
+    depth: usize,
+) -> Vec<ExportClip> {
     let Some(timeline) = pick_timeline(project, timeline_id) else {
         return Vec::new();
     };
@@ -48,7 +61,26 @@ pub fn flatten_timeline_in(
     timeline
         .clips
         .iter()
-        .filter_map(|clip| {
+        .flat_map(|clip| {
+            if clip.kind == ModelClipKind::Compound {
+                return expand_compound(project, timeline, clip, project_dir, depth);
+            }
+            flatten_clip(project, timeline, clip, lane, project_dir).into_iter().collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Flattens one clip. Compound clips never come through here - the walker
+/// hands them to [`expand_compound`] instead - and titles and shapes
+/// rasterise separately and rejoin as stills; see concat-host's titles.
+fn flatten_clip(
+    project: &Project,
+    timeline: &Timeline,
+    clip: &Clip,
+    lane: Option<&str>,
+    project_dir: Option<&Path>,
+) -> Option<ExportClip> {
+    {
             // Titles and shapes rasterise separately and rejoin as stills;
             // see concat-host's titles.
             if matches!(clip.kind, ModelClipKind::Text | ModelClipKind::Shape) {
@@ -125,7 +157,8 @@ pub fn flatten_timeline_in(
                 | ModelClipKind::Layer
                 | ModelClipKind::SoundLayer
                 | ModelClipKind::Shape
-                | ModelClipKind::Transition => return None,
+                | ModelClipKind::Transition
+                | ModelClipKind::Compound => return None,
             };
             Some(ExportClip {
                 path: media.path.clone(),
@@ -234,8 +267,92 @@ pub fn flatten_timeline_in(
                 },
                 ..ExportClip::blank(kind, clip.start, clip.duration, index)
             })
-        })
-        .collect()
+    }
+}
+
+/// A compound clip, flattened: its sub-timeline's clips, drawn out onto
+/// the compound's own span and lanes. Nothing renders and no file is
+/// written - the same list `ExportClip` the pipeline would have read from
+/// clips loose on the timeline, at the same cost, which is the point of a
+/// compound: correct preview, export and sound with no render in between.
+fn expand_compound(
+    project: &Project,
+    timeline: &Timeline,
+    clip: &Clip,
+    project_dir: Option<&Path>,
+    depth: usize,
+) -> Vec<ExportClip> {
+    if depth >= MAX_COMPOUND_DEPTH {
+        return Vec::new();
+    }
+    let Some(reference) = clip.compound.as_ref() else {
+        // A compound that lost its reference has no content to draw.
+        return Vec::new();
+    };
+    let Some(index) = timeline
+        .tracks
+        .iter()
+        .position(|track| track.id == clip.track_id)
+    else {
+        return Vec::new();
+    };
+    let track = &timeline.tracks[index];
+    // The compound's own lane state rides over everything inside: hide or
+    // mute its lane and the whole compound hides or mutes.
+    let hidden = !track.visible;
+    let muted = track.muted || clip.muted == Some(true);
+    let volume = export_base(clip, KeyProperty::Volume);
+    let Some(sub) = project
+        .timelines
+        .iter()
+        .find(|timeline| timeline.id == reference.subtimeline_id)
+    else {
+        // The timeline is gone - RemoveTimeline refuses while a compound
+        // reads one, so this is undo leftovers and a hand edit, and a
+        // compound with no content draws nothing.
+        return Vec::new();
+    };
+    // Constant speed rides: the span maps proportionally and every clip's
+    // own rate multiplies by the compound's. A speed curve does not - over
+    // a timeline of clips each with their own curve there is no single
+    // honest reading of a second curve, so a curved compound plays straight.
+    let speed = if clip.speed_curve.is_none() {
+        clip.speed.max(f64::EPSILON)
+    } else {
+        1.0
+    };
+    // Where the contents begin: the earliest clip in the sub-timeline sits
+    // there, the same measure `CompoundClips` laid them down with. Clips
+    // added later sit inside or past the span either way, and a clip that
+    // starts before it draws into the compound's run-in, as a longer title
+    // would into a merge's.
+    let contents_start = sub
+        .clips
+        .iter()
+        .map(|clip| clip.start)
+        .fold(f64::INFINITY, f64::min);
+    if !contents_start.is_finite() {
+        // An empty sub-timeline: nothing to draw.
+        return Vec::new();
+    }
+    let mut expanded = Vec::new();
+    // Walking the sub-timeline whole, not clip by clip, so a compound
+    // inside the compound expands the same way this one is expanding.
+    for mut export in flatten_nested(project, Some(&reference.subtimeline_id), project_dir, depth + 1)
+    {
+        // The sub's lanes stack onto the compound's: sub lane 0 renders
+        // where the compound sits, the rest climb above it, exactly as the
+        // same clips loose on the timeline would above the compound's lane.
+        export.track = index.saturating_add(export.track);
+        export.start = clip.start + (export.start - contents_start) / speed;
+        export.duration /= speed;
+        export.speed *= speed;
+        export.hidden |= hidden;
+        export.muted |= muted;
+        export.volume *= volume;
+        expanded.push(export);
+    }
+    expanded
 }
 
 /// A background as it is drawn: a blur and a colour as they are, a still
@@ -574,5 +691,306 @@ mod tests {
         // by asking for a timeline that does not exist.
         assert!(flatten_timeline(editor.project(), None).is_empty());
         assert!(flatten_timeline(editor.project(), Some("nope")).len() <= 1);
+    }
+
+    /// Two clips of different media on two different tracks - the mix a
+    /// compound exists for. Returns the editor and the two clip ids.
+    fn project_with_two_clips() -> (Editor, String, String) {
+        let mut editor = Editor::new();
+        let mut media_ids = Vec::new();
+        for (name, track, start) in [
+            ("a.mp4", 0, 1.0),
+            ("b.mp4", 2, 3.0),
+        ] {
+            let media_id = editor
+                .apply(Command::AddMedia {
+                    item: NewMedia {
+                        path: format!("/footage/{name}"),
+                        name: name.into(),
+                        duration: Some(10.0),
+                        kind: concat_project::model::MediaKind::Video,
+                        width: Some(1920),
+                        height: Some(1080),
+                        frame_rate: None,
+                        frame_rate_fraction: None,
+                        video_codec: None,
+                        audio_codec: None,
+                        has_audio: true,
+                        audio_tracks: Vec::new(),
+                        origin: None,
+                        color_space: Default::default(),
+                    },
+                })
+                .expect("adds media")
+                .created_id
+                .expect("mints an id");
+            let track_id = editor.project().timelines[0].tracks[track].id.clone();
+            let clip_id = editor
+                .apply(Command::AddClip {
+                    media_id: media_id.clone(),
+                    track_id,
+                    start,
+                    ripple: false,
+                })
+                .expect("adds clip")
+                .created_id
+                .expect("mints an id");
+            media_ids.push((clip_id, media_id));
+        }
+        let (a, _) = media_ids.pop().expect("second");
+        let (b, _) = media_ids.pop().expect("first");
+        (editor, b, a)
+    }
+
+    #[test]
+    fn a_compound_flattens_as_its_loose_clips() {
+        let (mut editor, first, second) = project_with_two_clips();
+        let loose = flatten_timeline(editor.project(), None);
+        assert_eq!(loose.len(), 2);
+
+        let compound_id = editor
+            .apply(Command::CompoundClips {
+                clip_ids: vec![first.clone(), second.clone()],
+            })
+            .expect("compounds")
+            .created_id
+            .expect("mints the compound");
+
+        // The sub-timeline exists and the compound reads as one clip.
+        let project = editor.project();
+        let compound = project
+            .active()
+            .clip(&compound_id)
+            .expect("the compound sits where the selection was")
+            .clone();
+        let reference = compound.compound.as_ref().expect("a compound reference");
+        let sub = project
+            .timelines
+            .iter()
+            .find(|timeline| timeline.id == reference.subtimeline_id)
+            .expect("the sub-timeline exists");
+        assert_eq!(sub.clips.len(), 2, "both clips moved in");
+
+        // Flattened, the compound is the same clips the loose edit had:
+        // same media, same order on the stack, same span of time, only
+        // carried on the compound's own lanes.
+        let flat = flatten_timeline(editor.project(), None);
+        assert_eq!(flat.len(), 2);
+        for (export, loose) in flat.iter().zip(loose.iter()) {
+            assert_eq!(export.path, loose.path);
+            assert_eq!(export.start, loose.start);
+            assert_eq!(export.duration, loose.duration);
+            assert_eq!(export.media_duration, loose.media_duration);
+            assert_eq!(export.speed, loose.speed);
+        }
+        // The lanes compress onto the ones the compound minted, in the
+        // order the clips stacked: a.mp4 was under b.mp4 and stays under.
+        assert!(flat[0].track < flat[1].track);
+        assert!(loose[0].track < loose[1].track);
+    }
+
+    #[test]
+    fn a_compound_hides_and_mutes_with_its_lane() {
+        let (mut editor, first, second) = project_with_two_clips();
+        let compound_id = editor
+            .apply(Command::CompoundClips {
+                clip_ids: vec![first, second],
+            })
+            .expect("compounds")
+            .created_id
+            .expect("mints the compound");
+        let track_id = editor
+            .project()
+            .active()
+            .clip(&compound_id)
+            .expect("the compound")
+            .track_id
+            .clone();
+        for (flag, value) in [(TrackFlag::Visible, false), (TrackFlag::Muted, true)] {
+            editor
+                .apply(Command::SetTrackFlag {
+                    track_id: track_id.clone(),
+                    flag,
+                    value,
+                })
+                .expect("sets the flag");
+            let flat = flatten_timeline(editor.project(), None);
+            assert_eq!(flat.len(), 2, "the contents still draw");
+            for export in &flat {
+            if flag == TrackFlag::Visible {
+                    assert!(export.hidden, "hidden with the compound's lane");
+                } else {
+                    assert!(export.muted, "muted with the compound's lane");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_nested_compound_expands_through_both() {
+        let (mut editor, first, second) = project_with_two_clips();
+        // A third clip joins the compound: a compound of a compound.
+        let media_id = editor
+            .apply(Command::AddMedia {
+                item: NewMedia {
+                    path: "/footage/c.mp4".into(),
+                    name: "c.mp4".into(),
+                    duration: Some(10.0),
+                    kind: concat_project::model::MediaKind::Video,
+                    width: Some(1920),
+                    height: Some(1080),
+                    frame_rate: None,
+                    frame_rate_fraction: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    has_audio: true,
+                    audio_tracks: Vec::new(),
+                    origin: None,
+                    color_space: Default::default(),
+                },
+            })
+            .expect("adds media")
+            .created_id
+            .expect("mints an id");
+        let track_id = editor.project().timelines[0].tracks[0].id.clone();
+        let third = editor
+            .apply(Command::AddClip {
+                media_id,
+                track_id,
+                start: 6.0,
+                ripple: false,
+            })
+            .expect("adds clip")
+            .created_id
+            .expect("mints an id");
+        let inner = editor
+            .apply(Command::CompoundClips {
+                clip_ids: vec![first, second],
+            })
+            .expect("compounds")
+            .created_id
+            .expect("mints the compound");
+        editor
+            .apply(Command::CompoundClips {
+                clip_ids: vec![inner, third.clone()],
+            })
+            .expect("compounds again");
+        let flat = flatten_timeline(editor.project(), None);
+        assert_eq!(flat.len(), 3, "every clip inside both compounds draws");
+        let starts: Vec<f64> = flat.iter().map(|export| export.start).collect();
+        let mut sorted = starts.clone();
+        sorted.sort_by(f64::total_cmp);
+        assert_eq!(starts, sorted, "the times came out in order");
+        for export in &flat {
+            assert_eq!(export.speed, 1.0);
+            assert_eq!(export.media_duration, Some(10.0));
+        }
+    }
+
+    #[test]
+    fn undoing_a_compound_puts_the_clips_back() {
+        let (mut editor, first, second) = project_with_two_clips();
+        let before = flatten_timeline(editor.project(), None);
+        let compound_id = editor
+            .apply(Command::CompoundClips {
+                clip_ids: vec![first, second],
+            })
+            .expect("compounds")
+            .created_id
+            .expect("mints the compound");
+        editor
+            .apply(Command::UncompoundClips {
+                clip_id: compound_id.clone(),
+            })
+            .expect("uncompounds");
+        let after = flatten_timeline(editor.project(), None);
+        assert_eq!(after.len(), 2);
+        for (was, again) in after.iter().zip(before.iter()) {
+            assert_eq!(was.path, again.path);
+            assert_eq!(was.track, again.track);
+            assert_eq!(was.start, again.start);
+            assert_eq!(was.duration, again.duration);
+        }
+        // And the compound and its timeline are gone.
+        let project = editor.project();
+        assert!(
+            project
+                .active()
+                .clip(&compound_id)
+                .is_none(),
+            "the compound clip went"
+        );
+        assert_eq!(
+            project
+                .timelines
+                .iter()
+                .filter(|timeline| timeline.name.starts_with("Compound"))
+                .count(),
+            0,
+            "the sub-timeline went"
+        );
+        assert!(editor.undo(), "the compound undoes too");
+    }
+
+    #[test]
+    fn a_timeline_a_compound_reads_cannot_be_removed() {
+        let (mut editor, first, second) = project_with_two_clips();
+        editor
+            .apply(Command::CompoundClips {
+                clip_ids: vec![first, second],
+            })
+            .expect("compounds");
+        // The sub-timeline the compound reads is the protected one.
+        let project = editor.project();
+        let compound = project.active().clips.last().expect("the compound").clone();
+        let sub_id = compound
+            .compound
+            .as_ref()
+            .expect("a compound reference")
+            .subtimeline_id
+            .clone();
+        assert!(matches!(
+            editor.apply(Command::RemoveTimeline { timeline_id: sub_id }),
+            Err(concat_project::commands::CommandError::TimelineInUse)
+        ));
+    }
+
+    #[test]
+    fn a_compound_cycle_terminates_and_draws_nothing_extra() {
+        let (mut editor, first, second) = project_with_two_clips();
+        let compound_id = editor
+            .apply(Command::CompoundClips {
+                clip_ids: vec![first, second],
+            })
+            .expect("compounds")
+            .created_id
+            .expect("mints the compound");
+        // Hand-edit the document until the compound reads the main
+        // timeline - a cycle no command can build, the guard exists for.
+        let settings = concat_project::DocumentSettings {
+            name: "Cycle".into(),
+            width: 1920,
+            height: 1080,
+            rate_num: 30,
+            rate_den: 1,
+            canvas: [0, 0, 0, 255],
+        };
+        let mut document = concat_project::to_document(&settings, editor.project());
+        let main_id = document["timelines"][0]["id"].clone();
+        let compound = document["timelines"][0]["clips"]
+            .as_array_mut()
+            .expect("clips")
+            .iter_mut()
+            .find(|clip| clip["id"] == compound_id.as_str())
+            .expect("the compound")
+            .as_object_mut()
+            .expect("an object");
+        compound["compound"]["subtimelineId"] = main_id;
+        let project = concat_project::from_document(&document).expect("reads back");
+        // Finite, and draws nothing: a compound that reads the timeline it
+        // sits on contains only itself, which contains only itself - the
+        // depth floor stops the walk instead of it running forever.
+        let flat = flatten_timeline(&project, None);
+        assert!(flat.is_empty());
     }
 }

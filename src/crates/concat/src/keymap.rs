@@ -93,6 +93,16 @@ pub const ACTIONS: &[Action] = &[
         id: "split",
         defaults: &["ctrl+b"],
     },
+    // Grouping the selection into one editable compound clip, and taking
+    // it apart again: Alt+G and Alt+Shift+G, the keys CapCut gives them.
+    Action {
+        id: "compound",
+        defaults: &["alt+g"],
+    },
+    Action {
+        id: "uncompound",
+        defaults: &["alt+shift+g"],
+    },
     Action {
         id: "delete",
         defaults: &["delete", "backspace"],
@@ -208,6 +218,8 @@ pub fn name(id: &str) -> String {
         "paste" => i18n::t("studio.paste"),
         "duplicate" => i18n::t("studio.duplicate"),
         "split" => i18n::t("studio.splitAtPlayhead"),
+        "compound" => i18n::t("studio.createCompound"),
+        "uncompound" => i18n::t("studio.undoCompoundClip"),
         "delete" => i18n::t("common.delete"),
         "ripple-delete" => i18n::t("shortcuts.rippleDelete"),
         "freeze" => i18n::t("timelinePane.freeze"),

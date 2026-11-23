@@ -48,6 +48,7 @@ mod backdrop;
 mod beats;
 mod consolidate;
 use consolidate::MergeJob;
+mod compound;
 mod masking;
 mod masks;
 use masking::{MaskFrame, MaskGrip};
@@ -1437,6 +1438,8 @@ fn kind_of(clip: &Clip) -> ClipKind {
         // Drawn as a layer is - a span over the lanes beneath it, named for
         // its package, with no picture of its own - in a colour of its own.
         model::ClipKind::Transition => ClipKind::Transition,
+        // One clip standing for a sub-timeline: violet, the fold badge.
+        model::ClipKind::Compound => ClipKind::Compound,
     }
 }
 
@@ -1743,6 +1746,9 @@ fn inspector_family(kind: model::ClipKind) -> u8 {
         model::ClipKind::Layer => 3,
         model::ClipKind::Audio | model::ClipKind::SoundLayer => 4,
         model::ClipKind::Transition => 5,
+        // A compound shows its reference and its places-restored data, no
+        // media and no chains of its own.
+        model::ClipKind::Compound => 6,
     }
 }
 
@@ -1993,6 +1999,8 @@ fn command_kind(command: &Command) -> &'static str {
         Command::FreezeFrame { .. } => "Freeze frame",
         Command::MergeClips { .. } => "Merge",
         Command::ConsolidateClips { .. } => "Merge into one clip",
+        Command::CompoundClips { .. } => "Create compound clip",
+        Command::UncompoundClips { .. } => "Undo compound clip",
         Command::RemoveClips { ripple: true, .. } => "Ripple delete",
         Command::RemoveClips { .. } => "Delete",
         Command::UpdateClip { .. } => "Change clip",

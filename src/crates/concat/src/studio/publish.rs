@@ -343,14 +343,24 @@ impl Studio {
         // What is under the playhead. The topmost picture wins, the way the
         // compositor stacks them.
         let playhead = f64::from(self.playhead);
+        let under_playhead = |clip: &&std::sync::Arc<model::Clip>| {
+            clip.start <= playhead && playhead < clip.start + clip.duration
+        };
         let showing = timeline
             .clips
             .iter()
             .filter(|clip| {
                 (clip.kind.is_visual()
                     || matches!(clip.kind, model::ClipKind::Text | model::ClipKind::Shape))
-                    && clip.start <= playhead
-                    && playhead < clip.start + clip.duration
+                    && under_playhead(clip)
+                    // A compound has a picture when what it flattens to
+                    // does; without this a compound-only span reads as
+                    // "Nothing under the playhead" while the render draws.
+                    || clip.kind == model::ClipKind::Compound
+                        && under_playhead(clip)
+                        && self
+                            .project()
+                            .compound_shows_picture(clip, model::MAX_COMPOUND_DEPTH)
             })
             .max_by_key(|clip| -self.row_of(&clip.track_id));
         // A picture from the bin on the monitor is shown whatever is under

@@ -55,6 +55,10 @@ impl Studio {
                     self.clip_action(&id, action);
                 }
             }
+            // The selection as a whole, not a sole clip: grouping takes
+            // two or more, and undoing looks for the compound itself.
+            "compound" => self.create_compound(),
+            "uncompound" => self.undo_compound(),
             // The tray's picture verbs. Mirror is the flip the H key does,
             // without the setting that gates the key: a button on the tray
             // is not a key someone might press by accident.
@@ -184,6 +188,8 @@ impl Studio {
                 self.delete_clips_to_playhead(&ids, side);
             }
             "merge" => self.merge(),
+            "compound" => self.create_compound(),
+            "uncompound" => self.undo_compound(),
             // On the clip that was right-clicked, which becomes the
             // selection, as Enhance's row makes it.
             "fit" | "fill" => {

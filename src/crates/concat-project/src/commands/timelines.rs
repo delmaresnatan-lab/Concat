@@ -111,6 +111,16 @@ pub(super) fn apply(
             else {
                 return Ok(Outcome::default());
             };
+            // A compound clip elsewhere reads this timeline as its content;
+            // removing it would empty every compound that points here, and
+            // the flattening one step of the pipeline would draw nothing.
+            if project.timelines.iter().flat_map(|timeline| timeline.clips.iter()).any(|clip| {
+                clip.compound
+                    .as_ref()
+                    .is_some_and(|reference| reference.subtimeline_id == timeline_id)
+            }) {
+                return Err(CommandError::TimelineInUse);
+            }
             if project.active_timeline_id == timeline_id {
                 let neighbour = if index + 1 < project.timelines.len() {
                     index + 1

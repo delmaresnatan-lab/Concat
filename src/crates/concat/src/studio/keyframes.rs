@@ -2291,6 +2291,20 @@ impl Studio {
                 self.merge_blocked().is_none(),
             ),
             action(
+                "compound",
+                t("studio.createCompound"),
+                Glyph::Group,
+                &keymap::label(&self.prefs, "compound"),
+                self.compound_blocked().is_none(),
+            ),
+            action(
+                "uncompound",
+                t("studio.undoCompoundClip"),
+                Glyph::Ungroup,
+                &keymap::label(&self.prefs, "uncompound"),
+                self.compound_target().is_some(),
+            ),
+            action(
                 "freeze",
                 t("studio.freezeFrame"),
                 Glyph::Frame,

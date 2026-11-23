@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     AppliedFilter, AudioTrack, Background, BeatMarks, CaptionCue, CaptionLook, Clip, ClipKind,
-    ClipMotion, ColorRange, ColorSpace, Cover, Crop, CustomFont, Cutout, CutoutMode, Enhanced,
+    ClipMotion, ColorRange, ColorSpace, CompoundOrigin, CompoundRef, Cover, Crop, CustomFont,
+    Cutout, CutoutMode, Enhanced,
     Framing, KeyEase, KeyProperty, Mask, MediaItem, MediaKind, MediaOrigin, Project, RunStyle,
     ShapeStyle, SpeedPoint, Stabilize, Stroke, TextStyle, Timeline, Track, Transition,
     VideoSettings, VoiceMix,
@@ -22,7 +23,9 @@ use crate::model::{
 
 mod audio;
 mod clips;
-pub use clips::{PlayheadSide, consolidation_clips, delete_to_playhead, why_not_merge};
+pub use clips::{
+    PlayheadSide, compound_selection, consolidation_clips, delete_to_playhead, why_not_merge,
+};
 mod media;
 mod properties;
 mod timelines;
@@ -813,6 +816,25 @@ pub enum Command {
         /// The completed, probed render stored in the project media folder.
         item: NewMedia,
     },
+    /// Groups the selected clips into one compound clip - a sub-timeline -
+    /// as one undoable edit. The clips move onto lanes of a new timeline
+    /// minted at the active one's frame; the compound clip covers their
+    /// span on the lane of the earliest, and remembers where each came
+    /// from so `uncompoundClips` can put them back. Nothing renders: the
+    /// flattening one step of the pipeline expands the compound wherever
+    /// it is read.
+    CompoundClips {
+        /// Two or more clips on any mix of tracks, in any order.
+        clip_ids: Vec<String>,
+    },
+    /// Puts a compound clip's contents back and removes the compound: the
+    /// sub-timeline's clips return to the lanes and places
+    /// [`Command::CompoundClips`] remembered, the sub-timeline is removed,
+    /// and the compound clip with it. One undoable edit.
+    UncompoundClips {
+        /// The compound clip to take apart.
+        clip_id: String,
+    },
     /// Deletes clips from the active timeline. Unknown ids are ignored.
     RemoveClips {
         /// The clips to delete.
@@ -1116,6 +1138,10 @@ pub enum CommandError {
         /// The [`why_not_merge`] sentence, verbatim.
         reason: String,
     },
+    /// [`Command::RemoveTimeline`] would have deleted a timeline a
+    /// compound clip still reads as its content.
+    #[error("A compound clip is still editing this timeline. Undo the compound first.")]
+    TimelineInUse,
     /// [`Command::RemoveTrack`] would have deleted the last track.
     #[error("A timeline needs at least one track.")]
     LastTrack,
@@ -1491,6 +1517,8 @@ pub fn apply(
         | Command::SetClipEnhanced { .. }
         | Command::MergeClips { .. }
         | Command::ConsolidateClips { .. }
+        | Command::CompoundClips { .. }
+        | Command::UncompoundClips { .. }
         | Command::RemoveClips { .. }) => clips::apply(project, mint, command),
         command @ (Command::UpdateClip { .. }
         | Command::StyleTextRange { .. }

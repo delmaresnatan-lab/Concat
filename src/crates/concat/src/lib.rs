@@ -2947,6 +2947,10 @@ fn start(project: Option<std::path::PathBuf>, smoke: Smoke) -> Result<(), slint:
                         theme.get_kind_sound_layer(),
                         theme.get_kind_sound_layer_well(),
                     ),
+                    ClipKind::Compound => (
+                        theme.get_kind_compound(),
+                        theme.get_kind_compound_well(),
+                    ),
                 };
                 let wave = studio
                     .peaks

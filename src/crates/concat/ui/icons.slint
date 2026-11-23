@@ -145,6 +145,12 @@ export enum Glyph {
     trash,
     magnet,
     fold,
+    /// a compound clip's badge: one frame holding a smaller one, a clip
+    /// standing for the sub-timeline inside it
+    group,
+    /// taking a compound clip apart: the smaller square slips out of the
+    /// frame, the clips restored to the timeline
+    ungroup,
     link,
     /// the preview axis: a hairline with the pointer beside it
     axis,
@@ -852,6 +858,19 @@ export component Icon inherits Rectangle {
         size: root.size; tint: root.tint; weight: root.weight;
         commands: "M2 12h6 M22 12h-6 M12 2v2 M12 8v2 M12 14v2 M12 20v2"
             + " M19 9l-3 3 3 3 M5 15l3-3-3-3";
+    }
+
+    // a frame holding a smaller one: the compound clip, one clip reading
+    // for the sub-timeline inside it.
+    if root.glyph == Glyph.group: Stroked {
+        size: root.size; tint: root.tint; weight: root.weight;
+        commands: "M4 4h16v16H4z M9 9h6v6H9z";
+    }
+    // the same frame, the smaller square slipped out through its top
+    // edge: taking the compound apart.
+    if root.glyph == Glyph.ungroup: Stroked {
+        size: root.size; tint: root.tint; weight: root.weight;
+        commands: "M4 4h16v16H4z M9 2h6v6H9z";
     }
 
     // lucide/link: two links of a chain, for linkage - the lanes held to

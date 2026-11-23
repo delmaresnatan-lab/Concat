@@ -946,6 +946,164 @@ pub(super) fn apply(
             })
         }
 
+        Command::CompoundClips { clip_ids } => {
+            let clips = compound_selection(project.active(), &clip_ids)?;
+            // The span the compound covers: from the earliest start to the
+            // latest end, across every track the selection sits on.
+            let first_start = clips
+                .iter()
+                .map(|clip| clip.start)
+                .fold(f64::INFINITY, f64::min);
+            let end = clips
+                .iter()
+                .map(|clip| clip.start + clip.duration)
+                .fold(0.0, f64::max);
+            // One sub lane per lane the selection came from, in the parent's
+            // top-to-bottom order, so the contents stack the way they did.
+            let lanes: Vec<String> = project
+                .active()
+                .tracks
+                .iter()
+                .filter(|track| clips.iter().any(|clip| clip.track_id == track.id))
+                .map(|track| track.id.clone())
+                .collect();
+            let sub_track_ids: Vec<String> = (0..lanes.len()).map(|_| mint.next("t")).collect();
+            let sub_id = mint.next("tl");
+            let name = super::next_numbered(
+                "Compound",
+                project
+                    .timelines
+                    .iter()
+                    .map(|timeline| timeline.name.clone()),
+            );
+            let compound_id = mint.next("c");
+            // Born at the frame, background and linkage of the timeline the
+            // selection came from, as `AddTimeline` births a manual one.
+            let video = project.active().video;
+            let background = project.active().background.clone();
+            let linkage = project.active().linkage;
+            let origin_track = clips[0].track_id.clone();
+            let tracks: Vec<Track> = sub_track_ids
+                .iter()
+                .map(|id| Track {
+                    id: id.clone(),
+                    visible: true,
+                    muted: false,
+                    extra: Default::default(),
+                })
+                .collect();
+            let mut origins = Vec::with_capacity(clips.len());
+            let mut moved = Vec::with_capacity(clips.len());
+            for clip in &clips {
+                origins.push(CompoundOrigin {
+                    clip_id: clip.id.clone(),
+                    track_id: clip.track_id.clone(),
+                    // Relative to the span, so moving the compound carries
+                    // its contents with it when they are put back.
+                    start: clip.start - first_start,
+                });
+                let mut moved_clip = clip.clone();
+                moved_clip.track_id = sub_track_ids[lanes
+                    .iter()
+                    .position(|lane| lane == &clip.track_id)
+                    .expect("counted above")]
+                .clone();
+                moved_clip.start -= first_start;
+                moved.push(Arc::new(moved_clip));
+            }
+            let mut compound = Clip::blank(
+                compound_id.clone(),
+                origin_track,
+                ClipKind::Compound,
+                name.clone(),
+                first_start,
+                end - first_start,
+            );
+            compound.compound = Some(CompoundRef {
+                subtimeline_id: sub_id.clone(),
+                origins,
+            });
+            let timeline = project.active_mut();
+            let selected: HashSet<&str> = clip_ids.iter().map(String::as_str).collect();
+            timeline.clips.retain(|clip| !selected.contains(clip.id.as_str()));
+            timeline.clips.push(Arc::new(compound));
+            project.timelines.push(Arc::new(Timeline {
+                id: sub_id.clone(),
+                name,
+                video,
+                background,
+                tracks,
+                clips: moved,
+                linkage,
+                extra: Default::default(),
+            }));
+            Ok(Outcome {
+                created_id: Some(compound_id),
+                applied: true,
+            })
+        }
+
+        Command::UncompoundClips { clip_id } => {
+            let timeline = project.active();
+            let Some(compound) = timeline.clip(&clip_id) else {
+                return Ok(Outcome::default());
+            };
+            let Some(reference) = compound.compound.as_ref() else {
+                return Err(CommandError::CannotMerge {
+                    reason: "Select a compound clip to undo.".into(),
+                });
+            };
+            let subtimeline_id = reference.subtimeline_id.clone();
+            let origins = reference.origins.clone();
+            let track = compound.track_id.clone();
+            let start = compound.start;
+            let Some(index) = project
+                .timelines
+                .iter()
+                .position(|timeline| timeline.id == subtimeline_id)
+            else {
+                return Err(CommandError::CannotMerge {
+                    reason: "The compound clip's timeline is gone.".into(),
+                });
+            };
+            let sub = project.timelines.remove(index);
+            if project.active_timeline_id == subtimeline_id {
+                // The tab open was the one going away; look at another.
+                project.active_timeline_id = project.timelines[0].id.clone();
+            }
+            let timeline = project.active_mut();
+            timeline.clips.retain(|clip| clip.id != clip_id);
+            // The compound's own lane may have been deleted while it was a
+            // compound; the clips come back on it if it is there, on the
+            // first lane if it is not, never on a lane that does not exist.
+            let track = if timeline.track(&track).is_some() {
+                track
+            } else {
+                timeline.tracks[0].id.clone()
+            };
+            for clip in sub.clips.iter() {
+                let mut restored = (**clip).clone();
+                match origins.iter().find(|o| o.clip_id == clip.id) {
+                    Some(origin) if timeline.track(&origin.track_id).is_some() => {
+                        restored.track_id = origin.track_id.clone();
+                        restored.start = start + origin.start;
+                    }
+                    // No record, or the lane it was on is gone: the clip
+                    // comes back on the compound's own lane, at the place
+                    // it sits in the sub-timeline now.
+                    _ => {
+                        restored.track_id = track.clone();
+                        restored.start = start + clip.start;
+                    }
+                }
+                timeline.clips.push(Arc::new(restored));
+            }
+            Ok(Outcome {
+                created_id: None,
+                applied: true,
+            })
+        }
+
         Command::RemoveClips { clip_ids, ripple } => {
             let timeline = project.active_mut();
             let doomed: HashSet<&str> = clip_ids.iter().map(String::as_str).collect();
@@ -1433,5 +1591,41 @@ pub fn consolidation_clips(
     {
         return Err(refuse("Include both sides of a transition in the merge."));
     }
+    Ok(clips)
+}
+
+/// The clips a compound clip takes in, in start order. Unlike
+/// [`consolidation_clips`] there is no same-track, no same-kind and no
+/// overlap rule - mixing lanes, video, sound and titles is the point - only
+/// that two or more distinct clips are named and each still exists on a
+/// lane that does.
+pub fn compound_selection(
+    timeline: &Timeline,
+    clip_ids: &[String],
+) -> Result<Vec<Clip>, CommandError> {
+    let refuse = |reason: &str| CommandError::CannotMerge {
+        reason: reason.into(),
+    };
+    let selected: HashSet<_> = clip_ids.iter().collect();
+    if selected.len() < 2 || selected.len() != clip_ids.len() {
+        return Err(refuse(
+            "Select two or more distinct clips to group into a compound clip.",
+        ));
+    }
+    let mut clips: Vec<Clip> = clip_ids
+        .iter()
+        .map(|id| {
+            timeline
+                .clip(id)
+                .cloned()
+                .ok_or_else(|| refuse("A selected clip no longer exists."))
+        })
+        .collect::<Result<_, _>>()?;
+    for clip in &clips {
+        if timeline.track(&clip.track_id).is_none() {
+            return Err(CommandError::TrackGone);
+        }
+    }
+    clips.sort_by(|a, b| a.start.total_cmp(&b.start));
     Ok(clips)
 }
