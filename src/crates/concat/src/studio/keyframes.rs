@@ -2610,6 +2610,13 @@ impl Studio {
                     true,
                 ),
                 row(
+                    "open-share",
+                    t("studio.openSharedProject"),
+                    Glyph::Import,
+                    "",
+                    true,
+                ),
+                row(
                     "import",
                     t("studio.importMedia"),
                     Glyph::Import,
@@ -2622,6 +2629,13 @@ impl Studio {
                     Glyph::Import,
                     &keymap::label(&self.prefs, "save"),
                     true,
+                ),
+                row(
+                    "share",
+                    t("studio.shareProject"),
+                    Glyph::Export,
+                    "",
+                    self.session.is_some(),
                 ),
                 row(
                     "export",

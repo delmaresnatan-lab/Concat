@@ -100,6 +100,7 @@ mod wayland_drop {
 
 use dock::{Dock, SEAT_MIN_GRAB, SEAT_MIN_H, SEAT_MIN_W};
 use host::{Host, Shell};
+use concat_host::share;
 use panes::Msg;
 use panes::captions::CaptionsMsg;
 use panes::export::ExportMsg;
@@ -2718,6 +2719,21 @@ fn start(project: Option<std::path::PathBuf>, smoke: Smoke) -> Result<(), slint:
                         // cannot drift into disagreeing about what a project
                         // folder is.
                         "open" => state.handle(Msg::Start(StartMsg::Open)),
+                        // The shared project unpacks into a new project of
+                        // its own and opens like any other; the picker runs
+                        // with the studio unborrowed, as Import's does.
+                        "open-share" => host::pick_files_then(
+                            i18n::t("studio.pickSharedProject"),
+                            Some((
+                                i18n::t("lib.concatShare"),
+                                &[share::EXTENSION],
+                            )),
+                            |studio, _, _, paths| {
+                                if let Some(file) = paths.first() {
+                                    studio.open_shared_project(file);
+                                }
+                            },
+                        ),
                         // Asked with the studio unborrowed - it is
                         // borrowed for this whole match - and on a turn of
                         // its own; see `host::after_dialog`.
@@ -2729,6 +2745,7 @@ fn start(project: Option<std::path::PathBuf>, smoke: Smoke) -> Result<(), slint:
                             },
                         ),
                         "export" => state.handle(Msg::Export(ExportMsg::Open)),
+                        "share" => state.share_project(),
                         "template" => state.save_template(),
                         "speech" => state.handle(Msg::Speech(SpeechMsg::Open)),
                         "clear-cache" => state.clear_project_cache(),

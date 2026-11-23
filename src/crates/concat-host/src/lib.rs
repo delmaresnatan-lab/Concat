@@ -51,6 +51,7 @@ pub mod record;
 pub mod reverse;
 mod route;
 pub mod session;
+pub mod share;
 pub mod sounds;
 pub mod stabilize;
 pub mod templates;

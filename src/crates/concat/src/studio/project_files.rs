@@ -4,6 +4,8 @@
 
 use super::*;
 
+use concat_host::share::EXTENSION_DOT;
+
 impl Studio {
     // ── projects ──
 
@@ -67,6 +69,95 @@ impl Studio {
             );
         })?;
         self.open_project(info)
+    }
+
+    /// File › Share project: packs the open project - document, media and
+    /// fonts - into a `.concatshare` file of the person's choosing. The
+    /// picker runs with the studio unborrowed, as Save frame's does, and
+    /// the packing runs on a worker: a project's media can be gigabytes.
+    pub fn share_project(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let document = session.document();
+        let settings = session.settings();
+        let suggested = format!(
+            "{}{EXTENSION_DOT}",
+            projects::folder_name(&self.project_name)
+        );
+        let title = t("studio.shareProjectWhere");
+        let family = t("lib.concatShare");
+        // The dialog starts where the project lives; the file goes wherever
+        // the person says - a share travels, its folder does not.
+        let start_in = std::path::Path::new(session.path())
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from(home_folder("")));
+        crate::host::after_dialog(
+            move || {
+                let chosen = platform::save_file(
+                    &title,
+                    &start_in,
+                    &suggested,
+                    (family.as_str(), &[share::EXTENSION]),
+                )?;
+                Some(
+                    if chosen
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case(share::EXTENSION))
+                    {
+                        chosen
+                    } else {
+                        chosen.with_extension(share::EXTENSION)
+                    },
+                )
+            },
+            move |studio, _, _, file| {
+                let out = file.to_string_lossy().into_owned();
+                studio.notify(&tf("studio.sharingProject", &[&out]), false);
+                let packed = out.clone();
+                spawn_long(
+                    move || share::pack(&document, &settings, &packed, share::Missing::Refuse),
+                    move |studio, _, _, result| match result {
+                        Ok(()) => studio.notify(&tf("studio.sharedProject", &[&out]), false),
+                        Err(error) => studio.notify(&error, true),
+                    },
+                );
+            },
+        );
+    }
+
+    /// File › Open shared project: unpacks a `.concatshare` file into a new
+    /// project where the last one was made, and opens it. The unpacking
+    /// runs on a worker, as the packing does; a failure leaves the current
+    /// project as it was.
+    pub fn open_shared_project(&mut self, file: &std::path::Path) {
+        let file = file.to_path_buf();
+        let location = self
+            .prefs
+            .project_location()
+            .map(str::to_owned)
+            .unwrap_or_else(crate::panes::start::default_location);
+        let remembered = location.clone();
+        self.notify(
+            &tf(
+                "studio.openingSharedProject",
+                &[&file_name_of(&file.to_string_lossy())],
+            ),
+            false,
+        );
+        spawn_long(
+            move || share::unpack(&file.to_string_lossy(), &location),
+            move |studio, _, _, result| match result {
+                Ok(info) => {
+                    studio.prefs.last_project_location = Some(remembered);
+                    if let Err(error) = studio.open_project(info) {
+                        studio.notify(&error, true);
+                    }
+                }
+                Err(error) => studio.notify(&error, true),
+            },
+        );
     }
 
     /// [`Studio::open_project`], which says how it went.

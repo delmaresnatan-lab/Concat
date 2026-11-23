@@ -194,6 +194,31 @@ pub enum Request {
         name: String,
     },
 
+    /// Packs an open project into a `.concatshare` file: the document, its
+    /// media and fonts, and a manifest naming each file's digest. Media
+    /// whose file has left the disk is refused with its name unless
+    /// `include_missing` asks that it go across as a placeholder to relink.
+    #[serde(rename = "project.share")]
+    ProjectShare {
+        /// The project folder.
+        path: String,
+        /// The `.concatshare` file to write.
+        out_file: String,
+        /// Media whose file has left the disk: refused with their names
+        /// when absent or false, shared as placeholders when true.
+        #[serde(default)]
+        include_missing: Option<bool>,
+    },
+    /// Opens a `.concatshare` file as a new project under `location` - its
+    /// media copied inside, every digest checked first - and opens it.
+    #[serde(rename = "project.shareOpen")]
+    ProjectShareOpen {
+        /// The `.concatshare` file.
+        file: String,
+        /// The directory the project folder is made in.
+        location: String,
+    },
+
     /// Renders an open project's active timeline to a file, exactly as
     /// the window's Export does: cutouts analysed, stabilized clips'
     /// camera shake measured, titles painted, then the

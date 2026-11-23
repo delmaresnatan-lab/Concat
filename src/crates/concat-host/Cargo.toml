@@ -48,6 +48,10 @@ rustls-native-certs = "0.8"
 # A finished download is checked against the digest its table carries
 # before anything is allowed to call it installed; see models.rs.
 sha2 = "0.10"
+# The `.concatshare` package: a zip of the document, its media and its
+# fonts, with a manifest naming each file's digest; see share.rs. Deflate
+# alone - no package of ours is encrypted, and every OS opens a plain zip.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # The log facade. The engine writes `log::warn!` and logs.rs is what puts
 # the line in a file; a phone puts it in logcat as well.
 log = { version = "0.4", features = ["std"] }

@@ -35,7 +35,7 @@ use concat_effects::manifest::ParamType;
 use concat_host::playback::ClipSpec;
 use concat_host::{
     AnalyseRequest, Cutouts, EnhanceRequest, ProjectInfo, RegionRequest, Session, media, projects,
-    templates,
+    share, templates,
 };
 use concat_media::Pyramid;
 use concat_project::commands::{ClipMove, ClipPatch, TrackFlag, TrimEdge};

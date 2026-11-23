@@ -77,8 +77,9 @@ fn reply_schema(method: &str, generator: &mut SchemaGenerator) -> Option<Value> 
         | "captions.place"
         | "clips.freeze"
         | "clips.replace"
-        | "clips.useReversed" => of::<EditorView>(generator),
-        "project.close" | "project.save" | "export.cancel" | "captions.cancel"
+        | "clips.useReversed"
+        | "project.shareOpen" => of::<EditorView>(generator),
+        "project.close" | "project.save" | "export.cancel" | "project.share" | "captions.cancel"
         | "models.delete" | "speech.cancel" | "reverse.cancel" => of::<Done>(generator),
         "project.list" => of::<Vec<ProjectInfo>>(generator),
         "project.document" => json!({

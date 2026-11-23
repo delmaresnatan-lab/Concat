@@ -52,7 +52,7 @@ use concat_host::preview::{FrameSpec, Monitor};
 use concat_host::session::EditorView;
 use concat_host::stabilize::{StabilizeRequest, Stabilizers};
 use concat_host::templates::{self, SlotFill};
-use concat_host::{ProjectInfo, Session, Titles, lock, media, projects};
+use concat_host::{ProjectInfo, Session, Titles, lock, media, projects, share};
 use concat_project::Command;
 use concat_project::model::{Cover, VideoSettings};
 
@@ -510,6 +510,21 @@ impl Api {
             Request::TemplateSave { path, name } => {
                 Ok(Reply::Template(self.save_template(&path, &name)?))
             }
+            Request::ProjectShare {
+                path,
+                out_file,
+                include_missing,
+            } => {
+                let missing = match include_missing {
+                    Some(true) => share::Missing::Placeholder,
+                    _ => share::Missing::Refuse,
+                };
+                self.share(&path, &out_file, missing)?;
+                Ok(Reply::Done(Done {}))
+            }
+            Request::ProjectShareOpen { file, location } => {
+                view(self.open_shared(&file, &location)?)
+            }
             Request::ExportRun { path, spec } => Ok(Reply::Started(self.export(&path, &spec)?)),
             Request::CaptionsTranscribe {
                 path,
@@ -793,6 +808,31 @@ impl Api {
             name,
         )
         .map_err(ApiError::failed)
+    }
+
+    /// [`Request::ProjectShare`]: the open document and its media, packed.
+    pub fn share(
+        &mut self,
+        path: &str,
+        out_file: &str,
+        missing: share::Missing,
+    ) -> Result<(), ApiError> {
+        self.writable(out_file)?;
+        let session = self.session(path)?;
+        share::pack(
+            &session.document(),
+            &session.settings(),
+            out_file,
+            missing,
+        )
+        .map_err(ApiError::failed)
+    }
+
+    /// [`Request::ProjectShareOpen`].
+    pub fn open_shared(&mut self, file: &str, location: &str) -> Result<EditorView, ApiError> {
+        self.writable(location)?;
+        let info = share::unpack(file, location).map_err(ApiError::failed)?;
+        self.adopt(info)
     }
 
     /// [`Request::ExportRun`]: what the window's Export sheet does, in its
@@ -2193,7 +2233,7 @@ mod tests {
     use super::*;
     use concat_project::commands::NewMedia;
     use concat_project::model::MediaKind;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::Mutex;
 
     /// An API whose config and data live in a scratch folder that goes
@@ -2252,6 +2292,82 @@ mod tests {
             origin: None,
             color_space: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_project_shares_and_reopens_in_another_folder() {
+        let (mut api, scratch, _) = api();
+        let path = project(&mut api, &scratch, "Beach");
+
+        // A clip whose file is on the disk, and one whose file has left
+        // it: the first goes across whole, the second as a gap to relink.
+        let clips = scratch.path().join("clips");
+        std::fs::create_dir_all(&clips).expect("scratch dir");
+        let clip = clips.join("clip.mp4");
+        std::fs::write(&clip, b"not really an mp4").expect("writes");
+        for (file, start) in [
+            (clip.to_string_lossy().into_owned(), 0.0),
+            ("/nowhere/gone.png".to_owned(), 2.0),
+        ] {
+            let added = view(ok(api.dispatch(Request::EditApply {
+                path: path.clone(),
+                command: Box::new(Command::AddMedia {
+                    item: still(&file),
+                }),
+            })));
+            ok(api.dispatch(Request::EditApply {
+                path: path.clone(),
+                command: Box::new(Command::AddClipAtFirstFree {
+                    media_id: added.created_id.expect("minted"),
+                    start,
+                }),
+            }));
+        }
+
+        let out = scratch.path().join("beach.concatshare");
+        ok(api.dispatch(Request::ProjectShare {
+            path: path.clone(),
+            out_file: out.to_string_lossy().into_owned(),
+            include_missing: Some(true),
+        }));
+        ok(api.dispatch(Request::ProjectClose {
+            path: path.clone(),
+            save: true,
+        }));
+
+        let elsewhere = scratch.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("scratch dir");
+        view(ok(api.dispatch(Request::ProjectShareOpen {
+            file: out.to_string_lossy().into_owned(),
+            location: elsewhere.to_string_lossy().into_owned(),
+        })));
+        let opened = api
+            .recents()
+            .into_iter()
+            .find(|info| info.path.starts_with(elsewhere.to_string_lossy().as_ref()))
+            .expect("the shared project opens as its own folder");
+
+        let document = match ok(api.dispatch(Request::ProjectDocument {
+            path: opened.path.clone(),
+        })) {
+            Reply::Document(document) => document,
+            _ => panic!("not a document"),
+        };
+        let media = document
+            .get("media")
+            .and_then(Value::as_array)
+            .expect("media");
+        let repointed = media[0]["path"].as_str().expect("path");
+        assert!(
+            Path::new(repointed).is_absolute()
+                && repointed.starts_with(&opened.path)
+                && Path::new(repointed).is_file(),
+            "the clip moved inside the project: {repointed}"
+        );
+        assert_eq!(media[1]["path"], "", "the gap is a placeholder");
+        assert_eq!(media[1]["placeholder"], true, "the engine reads it as one");
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// A project named `name` under the scratch folder, open.
