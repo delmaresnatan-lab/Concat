@@ -989,6 +989,9 @@ pub(super) fn apply(
                     id: id.clone(),
                     visible: true,
                     muted: false,
+                    // A compound's lanes are video/audio only; caption
+                    // lanes are never grouped into one.
+                    captions: None,
                     extra: Default::default(),
                 })
                 .collect();
